@@ -1,0 +1,10 @@
+
+# Steadfast API credentials
+/config/steadfast.php
+
+# Environment and secret files
+.env
+
+# Temporary files
+*.log
+/config/database.php
