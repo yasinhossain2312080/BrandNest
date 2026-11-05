@@ -1,7 +1,6 @@
 
 <?php
 session_start();
-
 require_once "../config/database.php";
 
 // Admin Login Check
@@ -10,10 +9,12 @@ if (!isset($_SESSION['admin_id'])) {
     exit;
 }
 
+// HTML Escape
 function e($value) {
     return htmlspecialchars((string)$value, ENT_QUOTES, 'UTF-8');
 }
 
+// Order Status Translation
 function statusBangla($status) {
     $statuses = [
         'pending' => 'নতুন অর্ডার',
@@ -27,6 +28,7 @@ function statusBangla($status) {
     return $statuses[$status] ?? $status;
 }
 
+// Courier Status Translation
 function courierStatusBangla($status) {
     $statuses = [
         'in_review' => 'পর্যালোচনায় রয়েছে',
@@ -38,65 +40,18 @@ function courierStatusBangla($status) {
         'in_transit' => 'পথে রয়েছে'
     ];
 
-    return $statuses[$status] ?? $status;
+    return $statuses[$status] ?? ($status ?: 'এখনো পাওয়া যায়নি');
 }
 
-$orderId = (int)($_GET['id'] ?? $_POST['order_id'] ?? 0);
+// Order ID
+$orderId = (int)($_GET['id'] ?? 0);
 
-$error = "";
-$success = "";
-
-// Validate Order ID
 if ($orderId <= 0) {
     die("সঠিক Order ID পাওয়া যায়নি।");
 }
 
-// Handle Manual Order Update
-if (
-    $_SERVER['REQUEST_METHOD'] === 'POST' &&
-    isset($_POST['update_order'])
-) {
-    $newStatus = $_POST['order_status'] ?? '';
-    $deliveryPartner = trim($_POST['delivery_partner'] ?? '');
-    $trackingId = trim($_POST['tracking_id'] ?? '');
-
-    $allowedStatuses = [
-        'pending',
-        'confirmed',
-        'processing',
-        'shipped',
-        'delivered',
-        'cancelled'
-    ];
-
-    if (!in_array($newStatus, $allowedStatuses, true)) {
-        $error = "সঠিক অর্ডার স্ট্যাটাস নির্বাচন করুন।";
-    } else {
-        $stmt = $conn->prepare("
-            UPDATE orders
-            SET order_status = ?,
-                delivery_partner = ?,
-                tracking_id = ?
-            WHERE id = ?
-        ");
-
-        $stmt->bind_param(
-            "sssi",
-            $newStatus,
-            $deliveryPartner,
-            $trackingId,
-            $orderId
-        );
-
-        if ($stmt->execute()) {
-            $success = "অর্ডারের তথ্য সফলভাবে আপডেট হয়েছে।";
-        } else {
-            $error = "তথ্য আপডেট করা যায়নি। আবার চেষ্টা করুন।";
-        }
-
-        $stmt->close();
-    }
-}
+$error = "";
+$success = "";
 
 // Courier Message
 $courierMessage = trim($_GET['courier_message'] ?? '');
@@ -112,6 +67,10 @@ $stmt = $conn->prepare("
     WHERE id = ?
     LIMIT 1
 ");
+
+if (!$stmt) {
+    die("Database Query তৈরি করা যায়নি।");
+}
 
 $stmt->bind_param("i", $orderId);
 $stmt->execute();
@@ -130,6 +89,10 @@ $stmt = $conn->prepare("
     WHERE order_id = ?
 ");
 
+if (!$stmt) {
+    die("Order Items Query তৈরি করা যায়নি।");
+}
+
 $stmt->bind_param("i", $orderId);
 $stmt->execute();
 
@@ -139,8 +102,20 @@ $items = $stmt->get_result();
 $bookingStatus = $order['steadfast_booking_status'] ?? 'not_booked';
 
 $isBooked = (
-    !empty($order['steadfast_consignment_id']) ||
-    $bookingStatus === 'booked'
+    $bookingStatus === 'booked' &&
+    !empty($order['steadfast_consignment_id'])
+);
+
+// Tracking URL Validation
+$trackingUrl = trim($order['steadfast_tracking_url'] ?? '');
+
+$trackingUrlIsValid = (
+    filter_var($trackingUrl, FILTER_VALIDATE_URL) &&
+    in_array(
+        strtolower((string)parse_url($trackingUrl, PHP_URL_SCHEME)),
+        ['http', 'https'],
+        true
+    )
 );
 
 ?>
@@ -156,6 +131,8 @@ $isBooked = (
     <title>অর্ডারের বিস্তারিত | BrandNest</title>
 
     <link rel="stylesheet" href="../assets/css/style.css">
+
+    <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"></script>
 
     <style>
 
@@ -211,23 +188,6 @@ $isBooked = (
             color: #c9a45c;
         }
 
-        .details-form label {
-            display: block;
-            margin: 15px 0 8px;
-        }
-
-        .details-form input,
-        .details-form select {
-            width: 100%;
-            box-sizing: border-box;
-            padding: 12px;
-            background: #242424;
-            color: white;
-            border: 1px solid #555;
-            border-radius: 6px;
-        }
-
-        .details-form button,
         .action-btn,
         .steadfast-btn,
         .tracking-refresh-btn,
@@ -295,11 +255,37 @@ $isBooked = (
             text-decoration: underline;
         }
 
+        .status-badge {
+            display: inline-block;
+            padding: 6px 12px;
+            border-radius: 5px;
+            background: #343434;
+            border: 1px solid #c9a45c;
+            color: #e5c47e;
+            font-weight: bold;
+        }
+
+        .barcode-box {
+            margin-top: 15px;
+            padding: 15px;
+            background: #fff;
+            border-radius: 6px;
+            text-align: center;
+            max-width: 350px;
+        }
+
+        .barcode-box svg {
+            width: 100%;
+            max-width: 300px;
+            height: 75px;
+        }
+
         .no-print {
             margin-bottom: 20px;
         }
 
         @media (max-width: 600px) {
+
             .details-grid {
                 grid-template-columns: 1fr;
             }
@@ -311,9 +297,11 @@ $isBooked = (
             .total-row {
                 font-size: 16px;
             }
+
         }
 
         @media print {
+
             body {
                 background: white !important;
                 color: black !important;
@@ -335,6 +323,7 @@ $isBooked = (
             .no-print {
                 display: none !important;
             }
+
         }
 
     </style>
@@ -362,7 +351,7 @@ $isBooked = (
     <?php endif; ?>
 
 
-    <!-- Customer Information -->
+    <!-- CUSTOMER INFORMATION -->
 
     <section class="details-card">
 
@@ -397,7 +386,11 @@ $isBooked = (
 
             <p>
                 <strong>অর্ডারের তারিখ:</strong><br>
-                <?php echo date('d-m-Y h:i A', strtotime($order['created_at'])); ?>
+                <?php
+                echo !empty($order['created_at'])
+                    ? date('d-m-Y h:i A', strtotime($order['created_at']))
+                    : 'N/A';
+                ?>
             </p>
 
         </div>
@@ -405,7 +398,7 @@ $isBooked = (
     </section>
 
 
-    <!-- Product Information -->
+    <!-- PRODUCT INFORMATION -->
 
     <section class="details-card">
 
@@ -416,35 +409,51 @@ $isBooked = (
             <table class="details-table">
 
                 <thead>
+
                     <tr>
                         <th>পণ্যের নাম</th>
                         <th>পরিমাণ</th>
                         <th>একক মূল্য</th>
                         <th>মোট মূল্য</th>
                     </tr>
+
                 </thead>
 
                 <tbody>
 
-                    <?php while ($item = $items->fetch_assoc()): ?>
+                    <?php if ($items->num_rows > 0): ?>
+
+                        <?php while ($item = $items->fetch_assoc()): ?>
+
+                            <tr>
+
+                                <td>
+                                    <?php echo e($item['product_name']); ?>
+                                </td>
+
+                                <td>
+                                    <?php echo (int)$item['quantity']; ?> টি
+                                </td>
+
+                                <td>
+                                    ৳ <?php echo number_format((float)$item['price'], 2); ?>
+                                </td>
+
+                                <td>
+                                    ৳ <?php echo number_format((float)$item['subtotal'], 2); ?>
+                                </td>
+
+                            </tr>
+
+                        <?php endwhile; ?>
+
+                    <?php else: ?>
 
                         <tr>
-                            <td><?php echo e($item['product_name']); ?></td>
-
-                            <td>
-                                <?php echo (int)$item['quantity']; ?> টি
-                            </td>
-
-                            <td>
-                                ৳ <?php echo number_format((float)$item['price'], 2); ?>
-                            </td>
-
-                            <td>
-                                ৳ <?php echo number_format((float)$item['subtotal'], 2); ?>
-                            </td>
+                            <td colspan="4">কোনো পণ্য পাওয়া যায়নি।</td>
                         </tr>
 
-                    <?php endwhile; ?>
+                    <?php endif; ?>
 
                 </tbody>
 
@@ -477,7 +486,28 @@ $isBooked = (
     </section>
 
 
-    <!-- Steadfast Parcel Booking and Tracking -->
+    <!-- ORDER STATUS: READ ONLY -->
+
+    <section class="details-card">
+
+        <h2>অর্ডারের বর্তমান অবস্থা</h2>
+
+        <p>
+            <strong>Website Order Status:</strong>
+            <span class="status-badge">
+                <?php echo e(statusBangla($order['order_status'])); ?>
+            </span>
+        </p>
+
+        <p style="color:#aaa; line-height:1.8;">
+            অর্ডারের অবস্থা এখন আর এই পেজ থেকে হাতে পরিবর্তন করা যাবে না।
+            Steadfast থেকে পাওয়া তথ্য অনুযায়ী Status Sync করা হবে।
+        </p>
+
+    </section>
+
+
+    <!-- STEADFAST TRACKING -->
 
     <section class="details-card no-print">
 
@@ -492,17 +522,23 @@ $isBooked = (
             <div class="tracking-info">
 
                 <p>
+                    <strong>Booking Status:</strong><br>
+                    <span class="status-badge">Booked</span>
+                </p>
+
+                <p>
                     <strong>Consignment ID:</strong><br>
                     <?php echo e($order['steadfast_consignment_id']); ?>
                 </p>
 
                 <p>
                     <strong>Tracking Code:</strong><br>
-                    <?php echo e($order['steadfast_tracking_code']); ?>
+                    <?php echo e($order['steadfast_tracking_code'] ?? 'তথ্য পাওয়া যায়নি'); ?>
                 </p>
 
                 <p>
                     <strong>Courier Status:</strong><br>
+
                     <?php
                     echo e(
                         courierStatusBangla(
@@ -510,6 +546,7 @@ $isBooked = (
                         )
                     );
                     ?>
+
                 </p>
 
                 <p>
@@ -528,14 +565,14 @@ $isBooked = (
 
                 </p>
 
-                <?php if (!empty($order['steadfast_tracking_url'])): ?>
+                <?php if ($trackingUrlIsValid): ?>
 
                     <p>
                         <strong>Tracking Link:</strong><br>
 
                         <a
                             class="tracking-link"
-                            href="<?php echo e($order['steadfast_tracking_url']); ?>"
+                            href="<?php echo e($trackingUrl); ?>"
                             target="_blank"
                             rel="noopener noreferrer"
                         >
@@ -545,19 +582,26 @@ $isBooked = (
 
                 <?php endif; ?>
 
+                <?php if (!empty($order['steadfast_tracking_code'])): ?>
+
+                    <div class="barcode-box">
+
+                        <svg id="trackingBarcode"></svg>
+
+                    </div>
+
+                <?php endif; ?>
+
             </div>
 
-            <!-- Refresh Tracking Status -->
 
             <a
                 href="steadfast_status.php?id=<?php echo (int)$order['id']; ?>"
                 class="tracking-refresh-btn"
                 onclick="return confirm('Steadfast থেকে সর্বশেষ Tracking Status আনতে চান?');"
             >
-                Tracking Status আপডেট করুন
+                Tracking Status Refresh করুন
             </a>
-
-            <!-- Tracking History Button -->
 
             <a
                 href="steadfast_history.php?id=<?php echo (int)$order['id']; ?>"
@@ -566,13 +610,82 @@ $isBooked = (
                 Tracking History দেখুন
             </a>
 
+
         <?php elseif ($order['order_status'] === 'cancelled'): ?>
 
             <p class="error-message">
                 বাতিল অর্ডার Steadfast-এ বুক করা যাবে না।
             </p>
 
-        <?php else: ?>
+
+        <?php elseif ($bookingStatus === 'booking'): ?>
+
+            <p class="success-message">
+                এই অর্ডারের Booking Request প্রক্রিয়াধীন।
+                অনুগ্রহ করে অপেক্ষা করুন।
+            </p>
+
+            <p class="error-message">
+                এই অবস্থায় পুনরায় Booking করবেন না।
+            </p>
+
+
+        <?php elseif ($bookingStatus === 'unknown'): ?>
+
+            <p class="error-message">
+                Booking-এর ফলাফল নিশ্চিত নয়।
+            </p>
+
+            <div class="tracking-info">
+
+                <strong>সতর্কতা:</strong><br>
+
+                Steadfast Merchant Portal-এ এই Invoice যাচাই করুন।
+                Parcel তৈরি হয়ে থাকলে নতুন করে Booking করবেন না।
+                যাচাই সম্পন্ন না হওয়া পর্যন্ত Retry বন্ধ থাকবে।
+
+            </div>
+
+
+        <?php elseif ($bookingStatus === 'failed'): ?>
+
+            <p class="error-message">
+                আগের Booking প্রচেষ্টা ব্যর্থ হিসেবে চিহ্নিত হয়েছে।
+            </p>
+
+            <div class="tracking-info">
+
+                Retry করার আগে Steadfast Merchant Portal-এ Invoice যাচাই করুন।
+                নিশ্চিত হতে হবে যে আগের Request থেকে কোনো Parcel তৈরি হয়নি।
+
+            </div>
+
+            <form
+                method="POST"
+                action="book_steadfast.php"
+                onsubmit="return confirm('Merchant Portal-এ যাচাই করে নিশ্চিত হয়েছেন যে Parcel তৈরি হয়নি? তাহলে পুনরায় Booking করবেন?');"
+            >
+
+                <input
+                    type="hidden"
+                    name="order_id"
+                    value="<?php echo (int)$order['id']; ?>"
+                >
+
+                <input
+                    type="hidden"
+                    name="csrf_token"
+                    value="<?php echo e($_SESSION['csrf_token'] ?? ''); ?>"
+                >
+
+                <button type="submit" class="steadfast-btn">
+                    যাচাই শেষে পুনরায় Booking করুন
+                </button>
+
+            </form>
+
+
+        <?php elseif ($bookingStatus === 'not_booked'): ?>
 
             <p>
                 এই অর্ডারটি এখনো Steadfast-এ বুক করা হয়নি।
@@ -590,113 +703,41 @@ $isBooked = (
                     value="<?php echo (int)$order['id']; ?>"
                 >
 
-                <button
-                    type="submit"
-                    class="steadfast-btn"
+                <input
+                    type="hidden"
+                    name="csrf_token"
+                    value="<?php echo e($_SESSION['csrf_token'] ?? ''); ?>"
                 >
+
+                <button type="submit" class="steadfast-btn">
                     Steadfast-এ পার্সেল বুক করুন
                 </button>
 
             </form>
 
-            <?php if ($bookingStatus === 'failed'): ?>
 
-                <p class="error-message" style="margin-top:15px;">
-                    আগের Booking প্রচেষ্টা ব্যর্থ হয়েছিল।
-                    নতুন করে বুক করার আগে Steadfast Merchant Portal-এ
-                    Invoice যাচাই করুন।
-                </p>
+        <?php else: ?>
 
-            <?php endif; ?>
+            <p class="error-message">
+                Booking Status অজানা বা সঠিক নয়।
+                Database যাচাই না করা পর্যন্ত Booking বন্ধ থাকবে।
+            </p>
 
         <?php endif; ?>
 
     </section>
 
 
-    <!-- Order Update -->
-
-    <section class="details-card no-print">
-
-        <h2>অর্ডার ও কুরিয়ার আপডেট</h2>
-
-        <form method="POST" class="details-form">
-
-            <input
-                type="hidden"
-                name="order_id"
-                value="<?php echo (int)$order['id']; ?>"
-            >
-
-            <label>অর্ডারের বর্তমান অবস্থা</label>
-
-            <select name="order_status" required>
-
-                <?php
-                $statuses = [
-                    'pending' => 'নতুন অর্ডার',
-                    'confirmed' => 'নিশ্চিত',
-                    'processing' => 'প্রস্তুত হচ্ছে',
-                    'shipped' => 'কুরিয়ারে পাঠানো হয়েছে',
-                    'delivered' => 'ডেলিভারি সম্পন্ন',
-                    'cancelled' => 'বাতিল'
-                ];
-
-                foreach ($statuses as $key => $label):
-                ?>
-
-                    <option
-                        value="<?php echo e($key); ?>"
-                        <?php echo $order['order_status'] === $key ? 'selected' : ''; ?>
-                    >
-                        <?php echo e($label); ?>
-                    </option>
-
-                <?php endforeach; ?>
-
-            </select>
-
-            <label>কুরিয়ার পার্টনার</label>
-
-            <input
-                type="text"
-                name="delivery_partner"
-                placeholder="যেমন: Steadfast"
-                value="<?php echo e($order['delivery_partner'] ?? ''); ?>"
-            >
-
-            <label>ট্র্যাকিং নম্বর</label>
-
-            <input
-                type="text"
-                name="tracking_id"
-                placeholder="কুরিয়ারের Tracking ID"
-                value="<?php echo e($order['tracking_id'] ?? ''); ?>"
-            >
-
-            <button
-                type="submit"
-                name="update_order"
-                value="1"
-            >
-                পরিবর্তন সংরক্ষণ করুন
-            </button>
-
-        </form>
-
-    </section>
-
-
-    <!-- Print and Back -->
+    <!-- PRINT AND BACK -->
 
     <div class="no-print">
 
-        <button
-            onclick="window.print()"
+        <a
+            href="print_invoice.php?id=<?php echo (int)$order['id']; ?>"
             class="action-btn"
         >
-            অর্ডার স্লিপ প্রিন্ট করুন
-        </button>
+            অর্ডার ইনভয়েস প্রিন্ট করুন
+        </a>
 
         <a
             href="orders.php"
@@ -705,9 +746,52 @@ $isBooked = (
             অর্ডার তালিকায় ফিরে যান
         </a>
 
+        <a
+            href="dashboard.php"
+            class="action-btn"
+        >
+            Dashboard
+        </a>
+
     </div>
 
 </main>
+
+
+<?php if ($isBooked && !empty($order['steadfast_tracking_code'])): ?>
+
+<script>
+
+document.addEventListener("DOMContentLoaded", function () {
+
+    if (typeof JsBarcode !== "undefined") {
+
+        JsBarcode(
+            "#trackingBarcode",
+            <?php
+            echo json_encode(
+                $order['steadfast_tracking_code'],
+                JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP
+            );
+            ?>,
+            {
+                format: "CODE128",
+                displayValue: true,
+                height: 55,
+                width: 1.5,
+                margin: 5,
+                background: "#ffffff",
+                lineColor: "#000000"
+            }
+        );
+
+    }
+
+});
+
+</script>
+
+<?php endif; ?>
 
 </body>
 </html>

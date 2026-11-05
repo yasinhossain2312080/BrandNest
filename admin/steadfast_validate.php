@@ -70,7 +70,7 @@ $stmt->close();
 // Prepare Data
 $invoice = trim($order['order_number']);
 $name = trim($order['customer_name']);
-$phone = preg_replace('/\D/', '', $order['phone']);
+$phone = preg_replace('/\D/', '', $order['phone'] ?? '');
 
 $address = trim(
     $order['address'] . ", " . $order['area']
@@ -139,8 +139,7 @@ $payload = [
     'recipient_phone' => $phone,
     'recipient_address' => $address,
     'cod_amount' => $codAmount,
-    'item_description' => $itemDescription,
-    'total_lot' => max(1, $totalQuantity),
+    'note' => '',
     'delivery_type' => 0
 ];
 

@@ -7,4 +7,7 @@
 
 # Temporary files
 *.log
+/config/database.php/admin/create_admin.php
+
 /config/database.php
+/admin/create_admin.php

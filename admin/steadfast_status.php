@@ -13,7 +13,7 @@ if (!isset($_SESSION['admin_id'])) {
 // Return to Order Details
 function backToOrder($id, $message) {
     header(
-        "Location: view_order.php?id=" . $id .
+        "Location: view_order.php?id=" . (int)$id .
         "&courier_message=" . urlencode($message)
     );
     exit;
@@ -28,11 +28,18 @@ if ($orderId <= 0) {
 
 // Fetch Order
 $stmt = $conn->prepare("
-    SELECT steadfast_consignment_id
+    SELECT
+        steadfast_consignment_id,
+        steadfast_booking_status,
+        order_status
     FROM orders
     WHERE id = ?
     LIMIT 1
 ");
+
+if (!$stmt) {
+    backToOrder($orderId, "Database Query তৈরি করা যায়নি।");
+}
 
 $stmt->bind_param("i", $orderId);
 $stmt->execute();
@@ -44,13 +51,16 @@ if (!$order) {
     backToOrder($orderId, "অর্ডার পাওয়া যায়নি।");
 }
 
-// Check Booking
+// Check Successful Booking
 $consignmentId = $order['steadfast_consignment_id'];
 
-if (empty($consignmentId)) {
+if (
+    ($order['steadfast_booking_status'] ?? '') !== 'booked' ||
+    empty($consignmentId)
+) {
     backToOrder(
         $orderId,
-        "এই অর্ডারের কোনো Steadfast Parcel বুক করা হয়নি।"
+        "এই অর্ডারের সফল Steadfast Booking পাওয়া যায়নি।"
     );
 }
 
@@ -98,7 +108,9 @@ if (
     $httpCode !== 200 ||
     !is_array($result) ||
     (int)($result['status'] ?? 0) !== 200 ||
-    empty($result['delivery_status'])
+    !isset($result['delivery_status']) ||
+    !is_string($result['delivery_status']) ||
+    trim($result['delivery_status']) === ''
 ) {
     $message = is_array($result)
         ? ($result['message'] ?? 'Unknown API Error')
@@ -112,36 +124,142 @@ if (
 }
 
 // Get Delivery Status
-$deliveryStatus = (string)$result['delivery_status'];
+$deliveryStatus = strtolower(trim($result['delivery_status']));
+
+// Map Steadfast Status to Website Order Status
+$statusMapping = [
+    'in_review' => 'processing',
+    'pending' => 'processing',
+    'hold' => 'processing',
+
+    'in_transit' => 'shipped',
+    'partial_delivered' => 'shipped',
+
+    'delivered' => 'delivered',
+    'cancelled' => 'cancelled'
+];
+
+// Find Matching Website Status
+$newOrderStatus = $statusMapping[$deliveryStatus] ?? null;
 
 // Update Database
-$stmt = $conn->prepare("
-    UPDATE orders
-    SET steadfast_status = ?
-    WHERE id = ?
-      AND steadfast_consignment_id = ?
-");
+try {
 
-$stmt->bind_param(
-    "sis",
-    $deliveryStatus,
-    $orderId,
-    $consignmentId
-);
+    $conn->begin_transaction();
 
-if ($stmt->execute()) {
-    $stmt->close();
+    // Lock Order Before Updating
+    $lockStmt = $conn->prepare("
+        SELECT steadfast_booking_status, steadfast_consignment_id
+        FROM orders
+        WHERE id = ?
+        FOR UPDATE
+    ");
+
+    if (!$lockStmt) {
+        throw new Exception("Order Lock Query তৈরি করা যায়নি।");
+    }
+
+    $lockStmt->bind_param("i", $orderId);
+    $lockStmt->execute();
+
+    $lockedOrder = $lockStmt->get_result()->fetch_assoc();
+    $lockStmt->close();
+
+    // Verify Booking Again
+    if (
+        !$lockedOrder ||
+        $lockedOrder['steadfast_booking_status'] !== 'booked' ||
+        $lockedOrder['steadfast_consignment_id'] !== $consignmentId
+    ) {
+        throw new Exception(
+            "অর্ডারের Booking তথ্য পরিবর্তিত হয়েছে। আবার চেষ্টা করুন।"
+        );
+    }
+
+    if ($newOrderStatus !== null) {
+
+        // Update Courier and Website Status Together
+        $updateStmt = $conn->prepare("
+            UPDATE orders
+            SET steadfast_status = ?,
+                order_status = ?
+            WHERE id = ?
+              AND steadfast_consignment_id = ?
+        ");
+
+        if (!$updateStmt) {
+            throw new Exception("Database Update Query তৈরি করা যায়নি।");
+        }
+
+        $updateStmt->bind_param(
+            "ssis",
+            $deliveryStatus,
+            $newOrderStatus,
+            $orderId,
+            $consignmentId
+        );
+
+    } else {
+
+        // Unknown Courier Status:
+        // Save Courier Status Only
+        $updateStmt = $conn->prepare("
+            UPDATE orders
+            SET steadfast_status = ?
+            WHERE id = ?
+              AND steadfast_consignment_id = ?
+        ");
+
+        if (!$updateStmt) {
+            throw new Exception("Database Update Query তৈরি করা যায়নি।");
+        }
+
+        $updateStmt->bind_param(
+            "sis",
+            $deliveryStatus,
+            $orderId,
+            $consignmentId
+        );
+    }
+
+    if (!$updateStmt->execute()) {
+        throw new Exception("Database-এ Status Save করা যায়নি।");
+    }
+
+    $updateStmt->close();
+
+    $conn->commit();
+
+    if ($newOrderStatus !== null) {
+
+        backToOrder(
+            $orderId,
+            "Steadfast Status আপডেট হয়েছে: " .
+            $deliveryStatus .
+            " | Website Order Status: " .
+            $newOrderStatus
+        );
+
+    } else {
+
+        backToOrder(
+            $orderId,
+            "Courier Status Save হয়েছে: " .
+            $deliveryStatus .
+            " | নতুন Status Mapping পাওয়া যায়নি, তাই Website Status পরিবর্তন করা হয়নি।"
+        );
+
+    }
+
+} catch (Throwable $e) {
+
+    try {
+        $conn->rollback();
+    } catch (Throwable $ignored) {
+    }
 
     backToOrder(
         $orderId,
-        "Steadfast Tracking Status আপডেট হয়েছে: " .
-        $deliveryStatus
+        "Status Update ব্যর্থ: " . $e->getMessage()
     );
 }
-
-$stmt->close();
-
-backToOrder(
-    $orderId,
-    "Tracking Status পাওয়া গেছে, কিন্তু Database-এ Save হয়নি।"
-);
